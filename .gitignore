@@ -1,0 +1,9 @@
+.rewrite-mcp/
+.venv/
+docs/
+temp/
+.env
+.env.example
+*.log
+*.pdf
+.DS_STORE

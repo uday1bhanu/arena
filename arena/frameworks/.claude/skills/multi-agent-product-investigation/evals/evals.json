@@ -1,0 +1,26 @@
+{
+  "skill_name": "multi-agent-product-investigation",
+  "evals": [
+    {
+      "id": 1,
+      "name": "t5-full-scenario",
+      "prompt": "Hi, this is customer CUST-001. I'm looking to upgrade my home office setup. I recently had issues with my laptop #ORD-1234, and I'm wondering:\n\n1. What's the status of my refund?\n2. Can you recommend a better laptop model based on my purchase history?\n3. I also need a good monitor and keyboard to go with it\n4. What's my total spending this year and do I qualify for any discounts?\n\nI want reliable products and I'm willing to spend up to $3000 total. Can you help me put together a complete setup?",
+      "expected_output": "Customer response that: (1) confirms refund status for ORD-1234, (2) recommends specific laptop model, (3) suggests monitor and keyboard, (4) shows YTD spending and discount eligibility, (5) provides complete setup pricing under $3000, (6) includes next steps",
+      "files": []
+    },
+    {
+      "id": 2,
+      "name": "simple-recommendation",
+      "prompt": "Hey, customer CUST-001 here. I need a new laptop for work and a decent monitor. My budget is around $2000. Can you recommend something? Also, do I get any discounts as a premium member?",
+      "expected_output": "Customer response with: (1) specific laptop recommendation, (2) specific monitor recommendation, (3) confirmation of premium discount, (4) total pricing with discount applied showing it's under $2000, (5) clear next steps",
+      "files": []
+    },
+    {
+      "id": 3,
+      "name": "edge-case-budget-conflict",
+      "prompt": "Hi, I'm customer CUST-001. I want to buy the TechPro Elite 16 laptop ($1899), the ProDisplay 32-inch monitor ($799), and the MechPro RGB keyboard ($149). But my budget is only $2000 total. What are my options? Do I qualify for any discounts?",
+      "expected_output": "Customer response that: (1) calculates the requested setup total ($2847 before discounts), (2) shows premium discount calculation, (3) explains that even with discount (~$2495) it exceeds budget, (4) presents alternative options (lower-tier items OR prioritization strategy), (5) empathetic tone acknowledging the constraint",
+      "files": []
+    }
+  ]
+}
