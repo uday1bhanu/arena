@@ -1,274 +1,286 @@
-"""CrewAI Multi-Agent Implementation for Scenario-3 (T5)."""
-from crewai import Agent, Task, Crew, Process
-from langchain_aws import ChatBedrock
+"""CrewAI Multi-Agent Implementation for Scenario-3 (T5) using CrewAI framework."""
 from .base import BaseAgent, AgentResult
-from typing import Any
 import time
 from datetime import datetime
+import asyncio
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 
 class CrewAIMultiAgent(BaseAgent):
     """
-    CrewAI implementation using Crew with multiple specialized agents.
+    CrewAI Multi-Agent implementation using the actual CrewAI framework.
 
-    Architecture:
-    - Research Agent: Gathers customer data and product information
-    - Analysis Agent: Evaluates options and calculates recommendations
-    - Communication Agent: Synthesizes findings into customer response
-    - Process: Sequential workflow with data passing between agents
+    Creates specialized agents:
+    - Research Agent: Gathers customer data, orders, and product information
+    - Analysis Agent: Evaluates options, calculates discounts, and optimizes budget
+    - Communication Agent: Synthesizes findings into customer-friendly response
     """
 
-    def __init__(self, model: str = "us.anthropic.claude-sonnet-4-5-v2:0", mcp_url: str = None):
+    def __init__(self):
         super().__init__()
-        self.model = model
-        self.mcp_url = mcp_url or "http://localhost:8000"
-
-        # Initialize LangChain ChatBedrock
-        self.llm = ChatBedrock(
-            model_id=model,
-            region_name="us-west-2",
-            model_kwargs={"temperature": 0, "max_tokens": 4096}
+        self.server_params = StdioServerParameters(
+            command="python",
+            args=["-m", "arena.mcp_server_v2"],
+            env=None
         )
+        self.tools = []
+        self._local_tool_log = []
+
+    def _load_tools(self):
+        """Load MCP tools synchronously."""
+        async def _get_tools():
+            async with stdio_client(self.server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools_result = await session.list_tools()
+
+                    tools = []
+                    for tool_def in tools_result.tools:
+                        if not tool_def.name.startswith("arena_"):
+                            tools.append({
+                                "name": tool_def.name,
+                                "description": tool_def.description,
+                                "parameters": tool_def.inputSchema
+                            })
+                    return tools
+
+        self.tools = asyncio.run(_get_tools())
+
+    def _make_crewai_tools(self):
+        """Convert MCP tools to CrewAI tools."""
+        from crewai.tools import BaseTool
+        from pydantic import BaseModel, Field, create_model
+        from typing import Optional
+        import concurrent.futures
+
+        def call_mcp_tool_sync(tool_name: str, **kwargs):
+            """Sync wrapper for MCP tool calls (required by CrewAI BaseTool)."""
+            # Log the tool call locally
+            self._local_tool_log.append(tool_name)
+
+            def run_in_thread():
+                """Run async call in a new thread with its own event loop."""
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    async def _async_call():
+                        async with stdio_client(self.server_params) as (read, write):
+                            async with ClientSession(read, write) as session:
+                                await session.initialize()
+                                result = await session.call_tool(tool_name, kwargs)
+                                return result.content[0].text
+
+                    return loop.run_until_complete(_async_call())
+                finally:
+                    loop.close()
+
+            # Execute in a separate thread to avoid event loop conflicts
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+                future = executor.submit(run_in_thread)
+                return future.result(timeout=30)
+
+        def make_tool_class(tool_def: dict):
+            """Factory to create tool class with proper parameter signature."""
+            tool_name = tool_def["name"]
+            tool_description = tool_def["description"]
+            tool_schema = tool_def["parameters"]
+
+            required_params = tool_schema.get("required", [])
+            properties = tool_schema.get("properties", {})
+
+            # Build field definitions for Pydantic model
+            fields = {}
+            for param_name, param_spec in properties.items():
+                param_desc = param_spec.get("description", "")
+                if param_name in required_params:
+                    fields[param_name] = (str, Field(..., description=param_desc))
+                else:
+                    fields[param_name] = (Optional[str], Field(None, description=param_desc))
+
+            # Create dynamic Pydantic model
+            ArgsModel = create_model(f'{tool_name}_args', **fields)
+
+            class MCPTool(BaseTool):
+                name: str = tool_name
+                description: str = tool_description
+                args_schema: type[BaseModel] = ArgsModel
+
+                def _run(self, **kwargs):
+                    return call_mcp_tool_sync(tool_name, **kwargs)
+
+            return MCPTool()
+
+        crewai_tools = []
+        for tool_def in self.tools:
+            crewai_tools.append(make_tool_class(tool_def))
+
+        return crewai_tools
 
     def run(self, user_message: str, customer_id: str) -> AgentResult:
-        """Run CrewAI multi-agent workflow."""
+        """Run multi-agent workflow using CrewAI framework."""
         start_time = time.time()
-        tools_used = []
 
         try:
-            # Define specialized agents
+            from crewai import Agent, Task, Crew, LLM
+            import os
+
+            # Reset tool log
+            self._local_tool_log = []
+
+            # Load MCP tools
+            self._load_tools()
+            crewai_tools = self._make_crewai_tools()
+
+            # Create Bedrock LLM using CrewAI's LLM wrapper (uses LiteLLM)
+            llm = LLM(
+                model="bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0",
+                temperature=0,
+                aws_region_name=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
+                aws_profile_name=os.getenv("AWS_PROFILE", "prod-tools")
+            )
+
+            # Create specialized agents
             research_agent = Agent(
                 role="Research Specialist",
-                goal="Gather comprehensive customer and product information",
-                backstory="""You are an expert research analyst who excels at collecting
-                and organizing data. You efficiently use available tools to gather customer
-                profiles, order histories, and product catalogs.""",
-                llm=self.llm,
-                tools=self._get_research_tools(),
-                verbose=True
+                goal="Gather comprehensive customer data, order history, and product information",
+                backstory="""You are a meticulous research specialist who excels at gathering
+                all relevant data before making recommendations. You always search knowledge bases
+                first to understand policies, then gather customer and product data systematically.""",
+                tools=crewai_tools,
+                verbose=True,
+                llm=llm
             )
 
             analysis_agent = Agent(
-                role="Analysis Specialist",
-                goal="Evaluate options and make data-driven recommendations",
-                backstory="""You are a strategic analyst who evaluates customer needs,
-                budget constraints, and product options to make optimal recommendations.
-                You consider pricing, discounts, and value propositions.""",
-                llm=self.llm,
-                tools=self._get_analysis_tools(),
-                verbose=True
+                role="Product Analysis Specialist",
+                goal="Evaluate products, calculate discounts, and optimize recommendations within budget",
+                backstory="""You are an expert product analyst who evaluates customer needs
+                against available products, calculates accurate pricing with discounts, and
+                ensures all recommendations fit within budget constraints.""",
+                tools=crewai_tools,
+                verbose=True,
+                llm=llm
             )
 
             communication_agent = Agent(
-                role="Communication Specialist",
-                goal="Create clear, empathetic customer responses",
-                backstory="""You are an expert communicator who synthesizes complex
-                information into friendly, actionable customer responses. You ensure
-                all questions are addressed and recommendations are well-explained.""",
-                llm=self.llm,
-                tools=[],  # No tools needed, works with provided data
-                verbose=True
+                role="Customer Communication Specialist",
+                goal="Synthesize research and analysis into clear, friendly customer responses",
+                backstory="""You are a customer service expert who creates warm, professional
+                responses that address all customer questions comprehensively. You always
+                explicitly state final prices and budget compliance.""",
+                tools=crewai_tools,
+                verbose=True,
+                llm=llm
             )
 
-            # Define tasks for each agent
+            # Create tasks for multi-agent workflow
             research_task = Task(
-                description=f"""Research the following for customer {customer_id}:
+                description=f"""Research the following customer inquiry for customer {customer_id}:
 
-Customer Request: {user_message}
+{user_message}
 
-Your tasks:
-1. Look up the customer profile to understand their tier and spending
-2. Retrieve their order history, especially order ORD-1234
-3. Search the knowledge base for:
-   - Refund policy and status checking
-   - Laptop recommendations
-   - Premium member benefits
+Your research must include:
+1. Search knowledge base for refund policy and product recommendations
+2. Get customer profile and tier information
+3. Retrieve order history, especially ORD-1234 status
 4. Get product catalogs for laptops, monitors, and keyboards
 
-Return a structured summary of all findings.""",
-                agent=research_agent,
-                expected_output="Structured data about customer, orders, and available products"
+Be thorough and gather all relevant data.""",
+                expected_output="""Complete research report with:
+- Knowledge base insights on refunds and product recommendations
+- Customer profile and purchase history
+- Order status for ORD-1234
+- Available product options in all categories""",
+                agent=research_agent
             )
 
             analysis_task = Task(
-                description=f"""Analyze the research findings and provide recommendations:
+                description="""Analyze the research data and provide recommendations:
 
-Customer Budget: $3000 maximum
-Customer Questions:
-1. Refund status for order ORD-1234?
-2. Laptop recommendations based on history?
-3. Monitor and keyboard suggestions?
-4. Total spending and discount eligibility?
+1. Determine refund status and next steps for ORD-1234
+2. Recommend best laptop based on customer history and avoiding previous issues
+3. Suggest compatible monitor and keyboard
+4. Calculate year-to-date spending and applicable discounts
+5. Ensure complete setup stays within $3000 budget
 
-Your tasks:
-1. Confirm refund status from order data
-2. Calculate YTD spending from order history
-3. Evaluate laptop options within budget
-4. Recommend complementary monitor and keyboard
-5. Calculate applicable discounts for the total setup
-6. Ensure total cost is within $3000
-
-Return clear recommendations with pricing and justifications.""",
+Provide specific product recommendations with exact pricing.""",
+                expected_output="""Analysis report with:
+- Refund status and timeline
+- Specific laptop, monitor, keyboard recommendations with product IDs
+- Detailed pricing breakdown with discounts
+- Total cost confirmation within budget""",
                 agent=analysis_agent,
-                expected_output="Product recommendations with pricing, discounts, and justifications",
-                context=[research_task]  # Depends on research task
+                context=[research_task]
             )
 
             communication_task = Task(
-                description=f"""Create the final customer response:
+                description="""Create a customer-friendly response based on the analysis.
 
-Synthesize the research and analysis findings into a friendly response that:
-1. Addresses the refund status for ORD-1234
-2. Recommends specific laptop model with reasoning
-3. Suggests monitor and keyboard to complement the setup
-4. Explains total YTD spending and applicable discounts
-5. Shows the complete setup pricing within $3000 budget
-6. Provides clear next steps for ordering
-
-Use a warm, helpful tone appropriate for a premium customer.""",
+Requirements:
+- Address all 5 customer questions clearly
+- Use warm, professional tone
+- Include specific product names and prices
+- MUST explicitly state: "$[final_price] within your $[budget_amount] budget"
+- Provide clear next steps""",
+                expected_output="""Complete customer response addressing:
+1. Refund status for ORD-1234
+2. Laptop recommendation with reasoning
+3. Monitor and keyboard suggestions
+4. YTD spending and discount eligibility
+5. Total setup cost explicitly stating "$X within your $Y budget" """,
                 agent=communication_agent,
-                expected_output="Complete customer response addressing all 4 questions",
-                context=[research_task, analysis_task]  # Depends on both previous tasks
+                context=[research_task, analysis_task]
             )
 
-            # Create crew with sequential process
+            # Create crew and execute
             crew = Crew(
                 agents=[research_agent, analysis_agent, communication_agent],
                 tasks=[research_task, analysis_task, communication_task],
-                process=Process.sequential,  # Execute tasks in order
-                verbose=True
+                verbose=False
             )
 
-            # Execute the crew
             result = crew.kickoff()
 
-            # Extract tool usage from crew execution
-            # Note: CrewAI doesn't provide direct tool tracking, so we estimate
-            tools_used = self._extract_tool_calls_from_crew(crew)
+            # Extract response
+            response_text = str(result)
+
+            # Extract token usage from crew usage_metrics
+            input_tokens = 0
+            output_tokens = 0
+            if hasattr(crew, "usage_metrics"):
+                metrics = crew.usage_metrics
+                input_tokens = getattr(metrics, "prompt_tokens", 0)
+                output_tokens = getattr(metrics, "completion_tokens", 0)
 
             end_time = time.time()
 
             return AgentResult(
                 success=True,
-                response=str(result),
+                response=response_text,
                 latency=end_time - start_time,
-                tool_calls=tools_used,
-                token_usage={"input": 0, "output": 0},  # CrewAI doesn't expose this
+                tool_calls=self._local_tool_log,
+                token_usage={"input_tokens": input_tokens, "output_tokens": output_tokens},
                 timestamp=datetime.now(),
                 metadata={
-                    "model": self.model,
                     "framework": "crewai_multiagent",
                     "agent_count": 3,
-                    "process": "sequential",
-                    "agents": ["research", "analysis", "communication"]
+                    "agents": ["research", "analysis", "communication"],
+                    "task_count": 3,
+                    "customer_id": customer_id
                 }
             )
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
+
             return AgentResult(
                 success=False,
                 response=f"Error: {str(e)}",
                 latency=time.time() - start_time,
-                tool_calls=[],
-                token_usage={"input": 0, "output": 0},
+                tool_calls=self._local_tool_log,
+                token_usage={"input_tokens": 0, "output_tokens": 0},
                 timestamp=datetime.now(),
-                metadata={"error": str(e)}
+                metadata={"error": str(e), "customer_id": customer_id}
             )
-
-    def _get_research_tools(self) -> list:
-        """Get tools for research agent."""
-        from langchain.tools import Tool
-        import requests
-        import json
-
-        def call_mcp_tool(tool_name: str, arguments: dict) -> str:
-            """Helper to call MCP server."""
-            try:
-                result = requests.post(
-                    f"{self.mcp_url}/call_tool",
-                    json={"tool": tool_name, "arguments": arguments},
-                    timeout=10
-                ).json()
-                return json.dumps(result.get("result", {}))
-            except Exception as e:
-                return json.dumps({"error": str(e)})
-
-        return [
-            Tool(
-                name="get_customer",
-                description="Look up customer profile by ID. Input: customer_id (string)",
-                func=lambda customer_id: call_mcp_tool("get_customer", {"customer_id": customer_id})
-            ),
-            Tool(
-                name="get_orders",
-                description="Retrieve all orders for a customer. Input: customer_id (string)",
-                func=lambda customer_id: call_mcp_tool("get_orders", {"customer_id": customer_id})
-            ),
-            Tool(
-                name="search_knowledge_base",
-                description="Search knowledge base. Input: query (string)",
-                func=lambda query: call_mcp_tool("search_knowledge_base", {"query": query})
-            ),
-            Tool(
-                name="get_product_catalog",
-                description="Get product catalog for category (laptops/monitors/keyboards). Input: category (string)",
-                func=lambda category: call_mcp_tool("get_product_catalog", {"category": category})
-            )
-        ]
-
-    def _get_analysis_tools(self) -> list:
-        """Get tools for analysis agent."""
-        from langchain.tools import Tool
-        import requests
-        import json
-
-        def call_mcp_tool(tool_name: str, arguments: dict) -> str:
-            """Helper to call MCP server."""
-            try:
-                result = requests.post(
-                    f"{self.mcp_url}/call_tool",
-                    json={"tool": tool_name, "arguments": arguments},
-                    timeout=10
-                ).json()
-                return json.dumps(result.get("result", {}))
-            except Exception as e:
-                return json.dumps({"error": str(e)})
-
-        # Analysis agent needs different tools
-        return [
-            Tool(
-                name="calculate_discount",
-                description="Calculate discounts for customer. Input: customer_id (string), total_amount (float)",
-                func=lambda args: call_mcp_tool("calculate_discount", eval(args) if isinstance(args, str) else args)
-            ),
-            Tool(
-                name="check_inventory",
-                description="Check product availability. Input: product_id (string)",
-                func=lambda product_id: call_mcp_tool("check_inventory", {"product_id": product_id})
-            )
-        ]
-
-    def _extract_tool_calls_from_crew(self, crew: Crew) -> list[str]:
-        """Extract tool calls from crew execution."""
-        # CrewAI doesn't expose tool call logs directly
-        # We estimate based on the agents and their tools
-        tools_used = []
-
-        # Research agent likely called these
-        tools_used.extend([
-            "get_customer",
-            "get_orders",
-            "search_knowledge_base",  # Multiple times
-            "search_knowledge_base",
-            "search_knowledge_base",
-            "get_product_catalog",
-            "get_product_catalog",
-            "get_product_catalog"
-        ])
-
-        # Analysis agent likely called these
-        tools_used.extend([
-            "calculate_discount"
-        ])
-
-        return tools_used

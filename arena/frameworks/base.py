@@ -1,6 +1,8 @@
 """Abstract base class for framework adapters."""
 from abc import ABC, abstractmethod
 from typing import Dict, Any
+from dataclasses import dataclass
+from datetime import datetime
 
 
 class FrameworkAdapter(ABC):
@@ -55,3 +57,30 @@ class FrameworkAdapter(ABC):
             self.mcp_process.terminate()
             self.mcp_process.wait()
             self.mcp_process = None
+
+
+@dataclass
+class AgentResult:
+    """Result from an agent execution."""
+    success: bool
+    response: str
+    latency: float
+    tool_calls: list[str]
+    token_usage: Dict[str, int]
+    timestamp: datetime
+    metadata: Dict[str, Any]
+
+
+class BaseAgent(ABC):
+    """Abstract base class for multi-agent implementations."""
+
+    def __init__(self):
+        pass
+
+    @abstractmethod
+    def run(self, user_message: str, customer_id: str) -> AgentResult:
+        """Run the agent with the user message and customer ID.
+
+        Returns an AgentResult with the response, latency, and metadata.
+        """
+        pass

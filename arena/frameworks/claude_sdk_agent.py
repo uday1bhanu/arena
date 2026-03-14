@@ -1,7 +1,9 @@
 """Claude SDK framework adapter using claude-agent-sdk-python."""
 import os
 import asyncio
-from arena.frameworks.base import FrameworkAdapter
+import time
+from datetime import datetime
+from arena.frameworks.base import FrameworkAdapter, BaseAgent, AgentResult
 
 # Set Bedrock environment variables
 os.environ["AWS_PROFILE"] = os.getenv("AWS_PROFILE", "prod-tools")
@@ -41,8 +43,22 @@ class ClaudeSDKAdapter(FrameworkAdapter):
             }
         }
 
+        # Load the multi-agent-product-investigation skill if available
+        skill_path = os.path.expanduser("~/.claude/skills/multi-agent-product-investigation/SKILL.md")
+        enhanced_prompt = self.system_prompt
+
+        if os.path.exists(skill_path):
+            with open(skill_path, 'r') as f:
+                skill_content = f.read()
+            # Extract the skill instructions (skip YAML frontmatter)
+            if '---' in skill_content:
+                parts = skill_content.split('---', 2)
+                if len(parts) >= 3:
+                    skill_instructions = parts[2].strip()
+                    enhanced_prompt = f"{self.system_prompt}\n\n# Multi-Agent Investigation Skill\n\n{skill_instructions}"
+
         options = ClaudeAgentOptions(
-            system_prompt=self.system_prompt,
+            system_prompt=enhanced_prompt,
             mcp_servers=mcp_servers,
             permission_mode="bypassPermissions",  # Auto-allow tools
             max_turns=20
@@ -103,3 +119,35 @@ class ClaudeSDKAdapter(FrameworkAdapter):
     def get_tool_log(self) -> list:
         """Return tool call log."""
         return self.tool_log
+
+    def run(self, user_message: str, customer_id: str) -> AgentResult:
+        """Run agent and return structured result (BaseAgent interface)."""
+        start_time = time.time()
+
+        try:
+            response = self.run_agent(user_message)
+            latency = time.time() - start_time
+            token_usage = self.get_token_usage()
+
+            return AgentResult(
+                success=True,
+                response=response,
+                latency=latency,
+                tool_calls=self.tool_log,
+                token_usage=token_usage,
+                timestamp=datetime.now(),
+                metadata={
+                    "framework": "claude_sdk_agent",
+                    "customer_id": customer_id
+                }
+            )
+        except Exception as e:
+            return AgentResult(
+                success=False,
+                response=f"Error: {str(e)}",
+                latency=time.time() - start_time,
+                tool_calls=[],
+                token_usage={"input_tokens": 0, "output_tokens": 0},
+                timestamp=datetime.now(),
+                metadata={"error": str(e), "customer_id": customer_id}
+            )

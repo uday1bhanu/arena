@@ -367,3 +367,7 @@ def get_tool_log() -> list[str]:
 def reset_tool_log() -> None:
     """Reset the tool call log."""
     _tool_call_log.clear()
+
+
+if __name__ == "__main__":
+    mcp.run()

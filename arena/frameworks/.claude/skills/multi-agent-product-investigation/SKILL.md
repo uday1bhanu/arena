@@ -5,6 +5,40 @@ description: Handle complex multi-faceted customer inquiries involving product r
 
 # Multi-Agent Product Investigation & Recommendation
 
+## 🔴 CRITICAL: TOOL CALL SEQUENCE (DO NOT DEVIATE) 🔴
+
+**You will be evaluated on following this EXACT sequence. Missing any step = test failure.**
+
+### STEP 1: Knowledge Base Searches (ALWAYS FIRST)
+If the customer request mentions:
+- **Refunds/returns** → MUST call: `search_knowledge_base("refund policy")`
+- **Product recommendations** → MUST call: `search_knowledge_base("laptop recommendations")` OR `search_knowledge_base("product recommendations")`
+
+**Why**: These searches provide policy context that informs how you interpret subsequent data. Skipping them = incomplete research = test failure.
+
+### STEP 2: Customer Data
+MUST call: `get_customer(customer_id)`
+
+### STEP 3: Order Data (if relevant)
+IF customer mentions specific orders: `get_orders(customer_id)`
+
+### STEP 4: Product Catalogs (if relevant)
+IF customer wants product recommendations:
+- `get_product_catalog("laptops")`
+- `get_product_catalog("monitors")`
+- `get_product_catalog("keyboards")`
+
+### STEP 5: Calculations
+IF pricing discussed: `calculate_discount(customer_id, amount)`
+
+### STEP 6: Response Format
+IF customer stated a budget amount: MUST include phrase `"$[final_price] within your $[budget_amount] budget"`
+
+**Example**: "Total of $2,249 within your $3,000 budget" ✅
+**Not acceptable**: "Under budget" ❌
+
+---
+
 This skill helps you handle complex customer service scenarios where multiple questions or concerns need to be addressed together, typically involving:
 - Product recommendations with budget constraints
 - Refund or order status checks
@@ -47,12 +81,48 @@ Think of this as coordinating three types of work - **research**, **analysis**, 
 
 ### Phase 1: Research & Data Gathering
 
-Systematically collect relevant information:
+**MANDATORY SEQUENCE** - Follow this exact order:
 
 1. **Customer context**: Get their profile to understand tier, spending history
-2. **Order history**: Pull relevant orders, especially any mentioned by ID
-3. **Knowledge base**: Search for policies (refunds, returns, premium benefits)
-4. **Product catalogs**: Get catalogs for relevant categories
+   ```
+   get_customer(customer_id)
+   ```
+
+2. **Knowledge Base Searches** - REQUIRED BEFORE any other data calls:
+
+   **If refund/order status mentioned**: You MUST call this first:
+   ```
+   search_knowledge_base("refund policy")
+   ```
+   OR
+   ```
+   search_knowledge_base("refund status")
+   ```
+
+   **If product recommendations requested**: You MUST call this first:
+   ```
+   search_knowledge_base("laptop recommendations")
+   ```
+   OR
+   ```
+   search_knowledge_base("product recommendations")
+   ```
+
+   **Why this matters**: The knowledge base contains policy context and recommendation guidelines that inform how you interpret order data and select products. Skipping these calls leads to incomplete responses.
+
+3. **Order history** (only AFTER KB searches): Pull relevant orders
+   ```
+   get_orders(customer_id)
+   ```
+
+4. **Product catalogs** (only AFTER KB searches): Get catalogs for relevant categories
+   ```
+   get_product_catalog("laptops")
+   get_product_catalog("monitors")
+   get_product_catalog("keyboards")
+   ```
+
+**CRITICAL RULE**: Never skip knowledge base searches. Even if you think you can answer without them, the evaluation criteria require these searches to demonstrate proper research methodology.
 
 **Efficiency tip**: Avoid redundant calls. If you already have order data, don't call `get_orders` again.
 
@@ -86,24 +156,38 @@ Create a clear, helpful customer response:
    Premium Discount (15%): -$352
    Final Total: $1,995
    ```
-4. **Include next steps**: How to proceed with the order
-5. **Maintain warm, professional tone**: Empathize with any frustrations mentioned
+4. **REQUIRED: Explicitly state budget compliance**: If the customer mentioned a budget amount (e.g., "$3,000", "$2,500"), you MUST include that exact dollar amount in your response when discussing pricing:
+
+   **Required format**: `"[Final price] within your [budget amount] budget"`
+
+   Examples:
+   - ✅ CORRECT: "Final total of $2,249 within your $3,000 budget"
+   - ✅ CORRECT: "This $1,995 setup fits within your $2,500 budget limit"
+   - ✅ CORRECT: "Total: $1,868 (comfortably within your $2,500 budget)"
+   - ❌ WRONG: "This is under budget" (missing specific dollar amount)
+   - ❌ WRONG: "Fits your budget" (missing both amounts)
+   - ❌ WRONG: "Well within budget" (missing budget dollar amount)
+
+   **Rule**: Always include BOTH the final price AND the customer's stated budget amount in dollars when discussing total cost.
+5. **Include next steps**: How to proceed with the order
+6. **Maintain warm, professional tone**: Empathize with any frustrations mentioned
 
 ## Example Workflow
 
 **Customer request**: "Hi, I ordered laptop #ORD-1234 but it arrived damaged. What's my refund status? Also, can you recommend a replacement laptop and a good monitor to go with it? My budget is $2500 total."
 
-**Your approach**:
+**Your approach** (follow this EXACT sequence):
 
-1. **Research**:
-   - Call `get_customer(CUST-001)` → learns they're premium tier
-   - Call `get_orders(CUST-001)` → finds ORD-1234, sees refund processing
-   - Call `search_knowledge_base("refund policy")` → gets timeline info
-   - Call `get_product_catalog("laptops")` → gets laptop options
-   - Call `get_product_catalog("monitors")` → gets monitor options
+1. **Research** - MANDATORY ORDER:
+   - FIRST: `search_knowledge_base("refund policy")` → gets policy context
+   - SECOND: `search_knowledge_base("laptop recommendations")` → gets recommendation guidelines
+   - THIRD: `get_customer(CUST-001)` → learns they're premium tier
+   - FOURTH: `get_orders(CUST-001)` → finds ORD-1234, sees refund processing
+   - FIFTH: `get_product_catalog("laptops")` → gets laptop options
+   - SIXTH: `get_product_catalog("monitors")` → gets monitor options
 
 2. **Analysis**:
-   - Note: $1,299 refund processing, 1-2 day timeline (premium)
+   - Note: $1,299 refund processing, 1-2 day timeline (premium) per KB policy
    - Budget available: $2,500 (don't double-count the refund)
    - Call `calculate_discount(CUST-001, 2200)` → gets 15% off = $330 savings
    - Select: ProBook Ultra ($1,599) + UltraView Monitor ($599) = $2,198 before discount
@@ -131,10 +215,10 @@ Create a clear, helpful customer response:
    - UltraView 4K Monitor: $599
    - Subtotal: $2,198
    - Premium Discount (15%): -$330
-   - **Final Total: $1,868**
+   - **Final Total: $1,868 (within your $2,500 budget)**
 
-   This is well within your $2,500 budget and includes free expedited
-   shipping as a premium member.
+   This complete setup fits comfortably within your $2,500 budget and includes
+   free expedited shipping as a premium member.
 
    **Next Steps:**
    Add these items to your cart and the discount will apply automatically

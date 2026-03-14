@@ -81,14 +81,62 @@ def evaluate_t4(tool_log: list[str], final_response: str) -> dict:
     }
 
 
+def evaluate_t5(tool_log: list[str], final_response: str) -> dict:
+    """Score Test T5: Multi-Agent Product Investigation & Recommendation."""
+    tool_log_str = str(tool_log)
+    final_response_lower = final_response.lower()
+
+    checks = {
+        # Research Phase (30%)
+        "looked_up_customer": "get_customer" in tool_log,
+        "retrieved_orders": "get_orders" in tool_log,
+        "searched_refund_info": "search_knowledge_base" in tool_log and any("refund" in str(call).lower() for call in tool_log),
+        "searched_products": "search_knowledge_base" in tool_log and any("laptop" in str(call).lower() or "product" in str(call).lower() for call in tool_log),
+        "used_catalog": "get_product_catalog" in tool_log,
+        # Analysis Phase (25%)
+        "confirmed_refund_status": "1234" in final_response and ("refund" in final_response_lower or "processing" in final_response_lower),
+        "calculated_spending": "get_customer" in tool_log or "spending" in final_response_lower or "8450" in final_response,
+        "checked_discounts": "calculate_discount" in tool_log or ("discount" in final_response_lower and "premium" in final_response_lower),
+        # Communication Phase (25%)
+        "addressed_all_questions": (
+            ("refund" in final_response_lower or "1234" in final_response) and
+            ("laptop" in final_response_lower or "recommend" in final_response_lower) and
+            ("monitor" in final_response_lower or "keyboard" in final_response_lower) and
+            ("discount" in final_response_lower or "spending" in final_response_lower)
+        ),
+        "provided_recommendations": (
+            ("techpro" in final_response_lower or "probook" in final_response_lower or "LAP-" in final_response) or
+            ("ultraview" in final_response_lower or "prodisplay" in final_response_lower or "MON-" in final_response)
+        ),
+        "within_budget": "3000" in final_response or "2999" in final_response or "2899" in final_response or "2799" in final_response,
+        # Multi-Agent Coordination (20%)
+        "efficient_tool_usage": len([c for c in tool_log if "get_orders" in c]) <= 2,
+        "logical_sequence": (
+            "get_customer" in tool_log and "get_product_catalog" in tool_log and
+            tool_log.index("get_customer") < tool_log.index("get_product_catalog")
+        ) if ("get_customer" in tool_log and "get_product_catalog" in tool_log) else False,
+    }
+    score = sum(checks.values()) / len(checks)
+    return {
+        "correctness_score": round(score, 2),
+        "correctness_details": checks,
+    }
+
+
 EVALUATORS = {
     "T1": evaluate_t1,
     "T2": evaluate_t2,
     "T3": evaluate_t3,
     "T4": evaluate_t4,
+    "T5": evaluate_t5,
 }
 
 
-def evaluate_scenario(scenario_id: str, tool_log: list[str], final_response: str) -> dict:
-    """Route to the appropriate evaluator."""
-    return EVALUATORS[scenario_id](tool_log, final_response)
+def evaluate_scenario(scenario_id: str, tool_log: list[str], final_response: str) -> tuple:
+    """Route to the appropriate evaluator.
+
+    Returns:
+        (correctness_score: float, criteria_results: dict)
+    """
+    result = EVALUATORS[scenario_id](tool_log, final_response)
+    return result["correctness_score"] * 100, result["correctness_details"]

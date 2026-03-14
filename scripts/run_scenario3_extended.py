@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """
-Run Scenario-3 (T5) - Multi-Agent Product Investigation & Recommendation
+Run Scenario-3 (T5) - Multi-Agent Product Investigation & Recommendation - Extended
 
-This script tests all 4 frameworks on the complex multi-agent scenario
-where multiple specialized agents must collaborate to handle a customer's
-request for product recommendations.
+This script tests all 6 frameworks on the complex multi-agent scenario:
+1. Claude SDK (with Skill)
+2. CrewAI (Multi-Agent)
+3. Google ADK (Multi-Agent)
+4. AWS Strands (Multi-Agent)
+5. LangGraph (Multi-Agent)
+6. LangChain (Multi-Agent)
 
 Usage:
-    python scripts/run_scenario3.py 1  # Run iteration 1
-    python scripts/run_scenario3.py 2  # Run iteration 2
+    python scripts/run_scenario3_extended.py 1  # Run iteration 1
+    python scripts/run_scenario3_extended.py 2  # Run iteration 2
 """
 
 import sys
@@ -27,6 +31,8 @@ from arena.frameworks.claude_sdk_agent import ClaudeSDKAdapter
 from arena.frameworks.crewai_multiagent import CrewAIMultiAgent
 from arena.frameworks.google_adk_multiagent import GoogleADKMultiAgent
 from arena.frameworks.aws_strands_multiagent import AWSStrandsMultiAgent
+from arena.frameworks.langgraph_multiagent import LangGraphMultiAgent
+from arena.frameworks.langchain_multiagent import LangChainMultiAgent
 
 
 def get_framework_file_path(framework_name: str) -> str:
@@ -36,6 +42,8 @@ def get_framework_file_path(framework_name: str) -> str:
         "CrewAI (Multi-Agent)": "arena/frameworks/crewai_multiagent.py",
         "Google ADK (Multi-Agent)": "arena/frameworks/google_adk_multiagent.py",
         "AWS Strands (Multi-Agent)": "arena/frameworks/aws_strands_multiagent.py",
+        "LangGraph (Multi-Agent)": "arena/frameworks/langgraph_multiagent.py",
+        "LangChain (Multi-Agent)": "arena/frameworks/langchain_multiagent.py",
     }
     return mapping.get(framework_name, "")
 
@@ -130,7 +138,7 @@ def run_framework(framework_name: str, framework_class, scenario_name: str, run_
 Help customers with their inquiries about orders, products, and account information."""
         agent = framework_class(system_prompt=system_prompt)
     else:
-        # Multi-agent frameworks (CrewAI, Google ADK, AWS Strands)
+        # Multi-agent frameworks
         agent = framework_class()
 
     try:
@@ -158,7 +166,7 @@ Help customers with their inquiries about orders, products, and account informat
         output_dir = Path(f"scenarios/scenario-3/iterations/iteration-{run_number}")
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        output_file = output_dir / f"{framework_name.lower().replace(' ', '_')}_t5_r{run_number}.json"
+        output_file = output_dir / f"{framework_name.lower().replace(' ', '_').replace('(', '').replace(')', '').replace('-', '_')}_t5_r{run_number}.json"
         output_data = {
             "framework": framework_name,
             "scenario": scenario_name,
@@ -205,8 +213,8 @@ Help customers with their inquiries about orders, products, and account informat
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python scripts/run_scenario3.py <iteration_number>")
-        print("Example: python scripts/run_scenario3.py 1")
+        print("Usage: python scripts/run_scenario3_extended.py <iteration_number>")
+        print("Example: python scripts/run_scenario3_extended.py 1")
         sys.exit(1)
 
     iteration = int(sys.argv[1])
@@ -214,17 +222,20 @@ def main():
     repetitions = 3  # Run each framework 3 times
 
     print("="*80)
-    print(f"SCENARIO-3 BENCHMARK - ITERATION {iteration}")
+    print(f"SCENARIO-3 EXTENDED BENCHMARK - ITERATION {iteration}")
     print(f"Scenario: {scenario_name} (Multi-Agent Product Investigation)")
+    print(f"Frameworks: 6 (Claude SDK, CrewAI, Google ADK, AWS Strands, LangGraph, LangChain)")
     print(f"Repetitions: {repetitions} per framework")
-    print(f"Total Runs: {4 * repetitions} (4 frameworks × {repetitions} runs)")
+    print(f"Total Runs: {6 * repetitions} (6 frameworks × {repetitions} runs)")
     print("="*80)
 
     frameworks = [
         ("Claude SDK (with Skill)", ClaudeSDKAdapter),
         ("CrewAI (Multi-Agent)", CrewAIMultiAgent),
         ("Google ADK (Multi-Agent)", GoogleADKMultiAgent),
-        ("AWS Strands (Multi-Agent)", AWSStrandsMultiAgent)
+        ("AWS Strands (Multi-Agent)", AWSStrandsMultiAgent),
+        ("LangGraph (Multi-Agent)", LangGraphMultiAgent),
+        ("LangChain (Multi-Agent)", LangChainMultiAgent)
     ]
 
     all_results = []
@@ -247,7 +258,7 @@ def main():
 
     # Generate summary
     print(f"\n\n{'='*80}")
-    print(f"ITERATION {iteration} SUMMARY")
+    print(f"ITERATION {iteration} SUMMARY - EXTENDED")
     print(f"{'='*80}")
     print(f"Total execution time: {total_time:.2f}s")
     print(f"\nFramework Results (averaged across {repetitions} runs):\n")
@@ -275,12 +286,13 @@ def main():
 
     # Save iteration summary
     summary_dir = Path(f"scenarios/scenario-3/iterations/iteration-{iteration}")
-    summary_file = summary_dir / f"ITERATION_{iteration}_SUMMARY.md"
+    summary_file = summary_dir / f"ITERATION_{iteration}_EXTENDED_SUMMARY.md"
 
     with open(summary_file, 'w') as f:
-        f.write(f"# Scenario-3 Iteration {iteration} Summary\n\n")
+        f.write(f"# Scenario-3 Extended Iteration {iteration} Summary\n\n")
         f.write(f"**Date**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         f.write(f"**Scenario**: T5 (Multi-Agent Product Investigation)\n")
+        f.write(f"**Frameworks**: 6\n")
         f.write(f"**Repetitions**: {repetitions} per framework\n")
         f.write(f"**Total Runs**: {len(all_results)}\n")
         f.write(f"**Total Time**: {total_time:.2f}s\n\n")
@@ -299,6 +311,7 @@ def main():
         f.write("- Multi-agent coordination effectiveness varies by framework\n")
         f.write("- Tool call efficiency is critical for performance\n")
         f.write("- Context passing between agents impacts correctness\n")
+        f.write("- LangGraph and LangChain provide additional multi-agent patterns\n")
 
     print(f"\nSummary saved to: {summary_file}")
 

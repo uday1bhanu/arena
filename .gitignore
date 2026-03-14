@@ -7,3 +7,5 @@ temp/
 *.log
 *.pdf
 .DS_STORE
+arena/frameworks/__pycache__/*
+arena/__pycache__/*

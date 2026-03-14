@@ -1,300 +1,309 @@
-"""Google ADK Multi-Agent Implementation for Scenario-3 (T5)."""
-from google import genai
-from google.genai import types
+"""Google ADK Multi-Agent Implementation for Scenario-3 (T5) using Google ADK framework."""
 from .base import BaseAgent, AgentResult
 import time
 from datetime import datetime
-import requests
+import asyncio
 import json
+import os
+import litellm
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
 
 
 class GoogleADKMultiAgent(BaseAgent):
     """
-    Google ADK implementation using multiple agent instances with specialized roles.
+    Google ADK Multi-Agent implementation using the actual Google ADK framework.
 
-    Architecture:
-    - Main Controller: Orchestrates workflow between specialists
-    - Research Specialist: Handles data gathering
-    - Analysis Specialist: Evaluates and recommends
-    - Communication Specialist: Generates final response
+    Creates specialized agents:
+    - Research Agent: Gathers customer data and knowledge base information
+    - Product Agent: Handles product catalogs and recommendations
+    - Analysis Agent: Calculates discounts and optimizes budget
+    - Coordinator Agent: Orchestrates workflow and synthesizes final response
     """
 
-    def __init__(self, model: str = "us.anthropic.claude-sonnet-4-5-v2:0", mcp_url: str = None):
+    def __init__(self):
         super().__init__()
-        self.model = model
-        self.mcp_url = mcp_url or "http://localhost:8000"
-
-        # Initialize Google ADK client
-        self.client = genai.Client(
-            vertexai=True,
-            project="your-project-id",  # Will use AWS Bedrock instead
-            location="us-west-2"
+        self.server_params = StdioServerParameters(
+            command="python",
+            args=["-m", "arena.mcp_server_v2"],
+            env=None
         )
+        self.tools = []
+        self.tool_log = []
+
+    def _load_tools(self):
+        """Load MCP tools synchronously."""
+        async def _get_tools():
+            async with stdio_client(self.server_params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    tools_result = await session.list_tools()
+
+                    tools = []
+                    for tool_def in tools_result.tools:
+                        if not tool_def.name.startswith("arena_"):
+                            tools.append({
+                                "name": tool_def.name,
+                                "description": tool_def.description,
+                                "parameters": tool_def.inputSchema
+                            })
+                    return tools
+
+        # Check if we're already in an event loop
+        try:
+            loop = asyncio.get_running_loop()
+            # Already in async context - can't use asyncio.run()
+            # Run in a new thread with its own event loop
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                self.tools = executor.submit(lambda: asyncio.run(_get_tools())).result()
+        except RuntimeError:
+            # No running loop, safe to use asyncio.run()
+            self.tools = asyncio.run(_get_tools())
 
     def run(self, user_message: str, customer_id: str) -> AgentResult:
-        """Run multi-agent workflow using Google ADK."""
+        """Run multi-agent workflow using Google ADK framework."""
         start_time = time.time()
-        tools_used = []
 
         try:
-            # PHASE 1: Research Agent - Data Gathering
-            research_result, research_tools = self._run_research_agent(user_message, customer_id)
-            tools_used.extend(research_tools)
-
-            # PHASE 2: Analysis Agent - Evaluation & Recommendations
-            analysis_result, analysis_tools = self._run_analysis_agent(research_result, user_message)
-            tools_used.extend(analysis_tools)
-
-            # PHASE 3: Communication Agent - Response Synthesis
-            final_response = self._run_communication_agent(
-                research_result, analysis_result, user_message
-            )
-
-            end_time = time.time()
-
-            return AgentResult(
-                success=True,
-                response=final_response,
-                latency=end_time - start_time,
-                tool_calls=tools_used,
-                token_usage={"input": 0, "output": 0},  # ADK doesn't expose this easily
-                timestamp=datetime.now(),
-                metadata={
-                    "model": self.model,
-                    "framework": "google_adk_multiagent",
-                    "agent_phases": 3,
-                    "specialists": ["research", "analysis", "communication"]
-                }
-            )
+            result = asyncio.run(self._run_async(user_message, customer_id))
+            return result
 
         except Exception as e:
+            import traceback
+            traceback.print_exc()
+
             return AgentResult(
                 success=False,
                 response=f"Error: {str(e)}",
                 latency=time.time() - start_time,
                 tool_calls=[],
-                token_usage={"input": 0, "output": 0},
+                token_usage={"input_tokens": 0, "output_tokens": 0},
                 timestamp=datetime.now(),
-                metadata={"error": str(e)}
+                metadata={"error": str(e), "customer_id": customer_id}
             )
 
-    def _run_research_agent(self, user_message: str, customer_id: str) -> tuple[str, list[str]]:
-        """Run research agent to gather data."""
-        tools_used = []
+    async def _run_async(self, user_message: str, customer_id: str) -> AgentResult:
+        """Async multi-agent execution using Google ADK."""
+        from google.adk.agents import LlmAgent
+        from google.adk.runners import Runner
+        from google.adk.sessions import InMemorySessionService
+        from google.adk.models.lite_llm import LiteLlm
+        from google.genai import types
+        import inspect
+        from typing import Optional
 
-        research_prompt = f"""You are a Research Specialist Agent.
+        start_time = time.time()
 
-Customer Request: {user_message}
-Customer ID: {customer_id}
+        # Hard-inject the model into LiteLLM's cost dictionary
+        litellm.model_cost["bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0"] = {
+            "max_tokens": 64000,
+            "max_input_tokens": 200000,
+            "max_output_tokens": 64000,
+            "litellm_provider": "bedrock",
+            "mode": "chat"
+        }
 
-TASK: Gather all relevant information by using the available tools:
+        # Load MCP tools
+        self._load_tools()
 
-1. Get customer profile (tier, spending, etc.)
-2. Retrieve order history (especially ORD-1234)
-3. Search knowledge base for:
-   - Refund policies
-   - Laptop recommendations
-   - Premium member benefits
-4. Get product catalogs for laptops, monitors, keyboards
+        # Reset local tool log
+        self.tool_log = []
 
-Call the tools systematically and organize the findings."""
+        # Keep persistent MCP connection throughout agent runs
+        async with stdio_client(self.server_params) as (read, write):
+            async with ClientSession(read, write) as mcp_session:
+                await mcp_session.initialize()
 
-        # Use tools to gather data
-        research_data = {}
+                # Create tool calling function with persistent session
+                async def call_mcp_tool(tool_name: str, **kwargs):
+                    """Call MCP tool using persistent session."""
+                    # Log the tool call
+                    self.tool_log.append(tool_name)
+                    result = await mcp_session.call_tool(tool_name, kwargs)
+                    return result.content[0].text
 
-        # Get customer
-        customer_data = self._call_tool("get_customer", {"customer_id": customer_id})
-        tools_used.append("get_customer")
-        research_data["customer"] = customer_data
+                # Convert MCP tools to Google ADK tool functions
+                def make_tool_wrapper(tool_def: dict):
+                    """Factory to create tool function with proper parameter signature."""
+                    tool_name = tool_def["name"]
+                    tool_description = tool_def["description"]
+                    tool_params = tool_def["parameters"]
 
-        # Get orders
-        orders_data = self._call_tool("get_orders", {"customer_id": customer_id})
-        tools_used.append("get_orders")
-        research_data["orders"] = orders_data
+                    required_params = tool_params.get("required", [])
+                    properties = tool_params.get("properties", {})
 
-        # Search KB for refund info
-        refund_kb = self._call_tool("search_knowledge_base", {"query": "refund policy status"})
-        tools_used.append("search_knowledge_base")
-        research_data["refund_policy"] = refund_kb
+                    # Build parameters list
+                    params = []
+                    for param_name, param_spec in properties.items():
+                        if param_name in required_params:
+                            params.append(inspect.Parameter(
+                                param_name,
+                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                annotation=str
+                            ))
+                        else:
+                            params.append(inspect.Parameter(
+                                param_name,
+                                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                                default=None,
+                                annotation=Optional[str]
+                            ))
 
-        # Search KB for laptop recommendations
-        laptop_kb = self._call_tool("search_knowledge_base", {"query": "laptop recommendations"})
-        tools_used.append("search_knowledge_base")
-        research_data["laptop_recommendations"] = laptop_kb
+                    # Create async function with proper signature
+                    async def tool_func(**kwargs) -> str:
+                        """Tool wrapper that calls MCP."""
+                        return await call_mcp_tool(tool_name, **kwargs)
 
-        # Search KB for premium benefits
-        premium_kb = self._call_tool("search_knowledge_base", {"query": "premium benefits discount"})
-        tools_used.append("search_knowledge_base")
-        research_data["premium_benefits"] = premium_kb
+                    # Set signature
+                    tool_func.__signature__ = inspect.Signature(params)
+                    tool_func.__name__ = tool_name
+                    tool_func.__doc__ = tool_description
 
-        # Get product catalogs
-        laptops_catalog = self._call_tool("get_product_catalog", {"category": "laptops"})
-        tools_used.append("get_product_catalog")
-        research_data["laptops"] = laptops_catalog
+                    return tool_func
 
-        monitors_catalog = self._call_tool("get_product_catalog", {"category": "monitors"})
-        tools_used.append("get_product_catalog")
-        research_data["monitors"] = monitors_catalog
+                adk_tools = []
+                for tool_def in self.tools:
+                    tool_wrapper = make_tool_wrapper(tool_def)
+                    adk_tools.append(tool_wrapper)
 
-        keyboards_catalog = self._call_tool("get_product_catalog", {"category": "keyboards"})
-        tools_used.append("get_product_catalog")
-        research_data["keyboards"] = keyboards_catalog
+                # Set AWS environment
+                os.environ["AWS_REGION_NAME"] = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
 
-        # Format research findings
-        research_summary = f"""
-RESEARCH FINDINGS:
+                # Initialize Session Service
+                app_name = "MultiAgentCustomerSupport"
+                user_id = f"user-{customer_id}"
+                session_id = "session-multiagent-001"
 
-Customer Profile: {json.dumps(research_data.get('customer', {}), indent=2)}
-Order History: {json.dumps(research_data.get('orders', {}), indent=2)}
-Refund Policy: {json.dumps(research_data.get('refund_policy', {}), indent=2)}
-Product Recommendations: {json.dumps(research_data.get('laptop_recommendations', {}), indent=2)}
-Premium Benefits: {json.dumps(research_data.get('premium_benefits', {}), indent=2)}
+                session_service = InMemorySessionService()
+                session = await session_service.create_session(
+                    app_name=app_name,
+                    user_id=user_id,
+                    session_id=session_id
+                )
 
-PRODUCT CATALOGS:
-Laptops: {json.dumps(research_data.get('laptops', {}), indent=2)}
-Monitors: {json.dumps(research_data.get('monitors', {}), indent=2)}
-Keyboards: {json.dumps(research_data.get('keyboards', {}), indent=2)}
-"""
-        return research_summary, tools_used
+                # Wrap the model string in LiteLlm object
+                claude_model = LiteLlm(
+                    model="bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+                )
 
-    def _run_analysis_agent(self, research_data: str, user_message: str) -> tuple[str, list[str]]:
-        """Run analysis agent to evaluate options."""
-        tools_used = []
+                # Create specialized agents using Google ADK
 
-        analysis_prompt = f"""You are an Analysis Specialist Agent.
+                # Research Agent - handles customer and knowledge base data
+                research_agent = LlmAgent(
+                    name="ResearchAgent",
+                    description="Research specialist that gathers customer data and searches knowledge bases",
+                    instruction="""You are a research specialist. Your role is to:
+1. Search knowledge bases for relevant policies (refunds, product recommendations)
+2. Gather customer profile and tier information
+3. Retrieve order history and status
+4. Compile comprehensive research data for analysis
 
-Research Data:
-{research_data}
+IMPORTANT: Always search knowledge base FIRST before gathering other data.""",
+                    model=claude_model,
+                    tools=adk_tools
+                )
 
-Customer Requirements:
-- Budget: $3000 maximum
-- Needs: Laptop + Monitor + Keyboard
-- Questions: Refund status, recommendations, spending, discounts
+                # Product Agent - handles product catalogs and recommendations
+                product_agent = LlmAgent(
+                    name="ProductAgent",
+                    description="Product specialist that retrieves catalogs and makes recommendations",
+                    instruction="""You are a product specialist. Your role is to:
+1. Retrieve product catalogs (laptops, monitors, keyboards)
+2. Match products to customer needs
+3. Consider customer purchase history
+4. Recommend compatible products
 
-TASK: Analyze the data and provide recommendations:
+Focus on quality and compatibility.""",
+                    model=claude_model,
+                    tools=adk_tools
+                )
 
-1. Confirm refund status for ORD-1234
-2. Calculate total YTD spending
-3. Recommend laptop within budget (considering previous issue)
-4. Select complementary monitor and keyboard
-5. Calculate total cost and applicable discounts
-6. Ensure final price is within $3000
+                # Analysis Agent - handles calculations and budget optimization
+                analysis_agent = LlmAgent(
+                    name="AnalysisAgent",
+                    description="Analysis specialist that calculates discounts and optimizes budgets",
+                    instruction="""You are an analysis specialist. Your role is to:
+1. Calculate applicable discounts based on customer tier
+2. Compute year-to-date spending
+3. Optimize product selections within budget constraints
+4. Provide accurate pricing breakdowns
 
-Provide structured recommendations with pricing."""
+Be precise with numbers and ensure budget compliance.""",
+                    model=claude_model,
+                    tools=adk_tools
+                )
 
-        # Calculate discount for estimated setup
-        estimated_total = 2500.00  # Estimated from catalogs
-        discount_data = self._call_tool("calculate_discount", {
-            "customer_id": "CUST-001",
-            "total_amount": estimated_total
-        })
-        tools_used.append("calculate_discount")
+                # Coordinator Agent - orchestrates workflow and synthesizes response
+                coordinator_agent = LlmAgent(
+                    name="CoordinatorAgent",
+                    description="Main coordinator that orchestrates multi-agent workflow and creates final response",
+                    instruction=f"""You are the main coordinator managing a team of specialist agents.
 
-        analysis_summary = f"""
-ANALYSIS RESULTS:
+Your team:
+- ResearchAgent: Gathers customer data and knowledge base information
+- ProductAgent: Retrieves product catalogs and makes recommendations
+- AnalysisAgent: Calculates discounts and optimizes budgets
 
-REFUND STATUS:
-- Order ORD-1234: Refund processing, amount $1299.99
-- Expected timeline: 1-2 business days (premium customer)
-
-YTD SPENDING:
-- Total: $8,450.32 (from customer profile)
-- Loyalty tier: Premium with 10% discount
-
-RECOMMENDED SETUP:
-1. Laptop: ProBook Ultra 15 - $1,599 (good reliability after previous issue)
-2. Monitor: UltraView 4K 27-inch - $599 (excellent value)
-3. Keyboard: MechPro RGB - $149 (high-rated)
-
-PRICING:
-- Subtotal: $2,347.00
-- Discount Info: {json.dumps(discount_data, indent=2)}
-- Final: ~$2,112 (well within $3000 budget)
-
-JUSTIFICATION:
-- ProBook Ultra: Balanced performance, reliable alternative to damaged laptop
-- Monitor: 4K quality at reasonable price
-- Keyboard: Premium mechanical, highly rated
-- Total savings: ~$235 with premium discounts
-"""
-        return analysis_summary, tools_used
-
-    def _run_communication_agent(
-        self, research_data: str, analysis_data: str, user_message: str
-    ) -> str:
-        """Run communication agent to generate final response."""
-
-        communication_prompt = f"""You are a Communication Specialist Agent.
-
-Research Findings:
-{research_data}
-
-Analysis Results:
-{analysis_data}
-
-Customer Request:
+Customer inquiry:
 {user_message}
 
-TASK: Create a friendly, comprehensive response that addresses all 4 customer questions:
-1. Refund status for ORD-1234
-2. Laptop recommendations
-3. Monitor and keyboard suggestions
-4. Spending and discount eligibility
+Customer ID: {customer_id}
 
-Use a warm, helpful tone appropriate for a premium customer. Be specific about products and pricing."""
+Your workflow:
+1. Direct ResearchAgent to search knowledge bases and gather customer data
+2. Direct ProductAgent to retrieve relevant product catalogs
+3. Direct AnalysisAgent to calculate discounts and optimize budget
+4. Synthesize all information into a comprehensive customer response
 
-        # Generate final response (simplified - would use ADK's generate in production)
-        final_response = """
-Hi Jane,
+Requirements for final response:
+- Address all customer questions clearly
+- Include specific product recommendations with names and IDs
+- MUST explicitly state: "$[final_price] within your $[budget_amount] budget"
+- Provide clear next steps
+- Use warm, professional tone""",
+                    model=claude_model,
+                    tools=adk_tools
+                )
 
-Thank you for reaching out! I'm happy to help you upgrade your home office setup. Let me address each of your questions:
+                # Create Runner for coordinator (main orchestrator)
+                runner = Runner(
+                    agent=coordinator_agent,
+                    app_name=app_name,
+                    session_service=session_service
+                )
 
-**1. Refund Status for Order #ORD-1234:**
-Your refund for the damaged ProBook Laptop is currently processing. As a premium member, you'll receive your $1,299.99 refund within 1-2 business days. We sincerely apologize for the inconvenience with the damaged laptop.
+                # Create message content
+                message_content = types.Content(
+                    role='user',
+                    parts=[types.Part.from_text(text=f"Please help customer {customer_id} with their inquiry: {user_message}")]
+                )
 
-**2. Laptop Recommendation:**
-Based on your purchase history and the issue with the previous laptop, I recommend the **ProBook Ultra 15** ($1,599). It offers excellent reliability with Intel i7 processor, 16GB RAM, and 512GB SSD. It's a solid performer that should serve you well.
+                # Run the coordinator agent
+                response_text = ""
+                async for event in runner.run_async(
+                    session_id=session.id,
+                    user_id=user_id,
+                    new_message=message_content
+                ):
+                    if event.is_final_response():
+                        if event.content and event.content.parts:
+                            response_text = event.content.parts[0].text
 
-**3. Complete Setup Recommendations:**
-To complement your new laptop, I suggest:
-- **UltraView 4K 27-inch Monitor** ($599): Excellent display quality with 4K resolution
-- **MechPro RGB Keyboard** ($149): Premium mechanical keyboard with great tactile feedback
+                # Tool log already tracked locally
+                end_time = time.time()
 
-**4. Your Spending & Discounts:**
-Your year-to-date spending is $8,450.32, which qualifies you for excellent premium member benefits:
-- 10% discount on orders over $500 ✓
-- Additional 5% loyalty bonus ✓
-
-**Your Complete Setup:**
-- ProBook Ultra 15: $1,599.00
-- UltraView 4K Monitor: $599.00
-- MechPro RGB Keyboard: $149.00
-- **Subtotal: $2,347.00**
-- **Premium Discounts: -$352.05 (15%)**
-- **Final Total: $1,994.95**
-
-This is **well within your $3,000 budget** and gives you over $1,000 in savings! As a premium member, you'll also get free expedited shipping.
-
-**Next Steps:**
-1. Visit our website and add these items to your cart
-2. Your discounts will be automatically applied at checkout
-3. Expected delivery: 1-2 business days
-
-Would you like me to help you place this order, or do you have any questions about these recommendations?
-
-Best regards,
-TechCorp Support Team
-"""
-        return final_response.strip()
-
-    def _call_tool(self, tool_name: str, arguments: dict) -> dict:
-        """Call MCP server tool."""
-        try:
-            result = requests.post(
-                f"{self.mcp_url}/call_tool",
-                json={"tool": tool_name, "arguments": arguments},
-                timeout=10
-            ).json()
-            return result.get("result", {})
-        except Exception as e:
-            return {"error": str(e)}
+                return AgentResult(
+                    success=True,
+                    response=response_text,
+                    latency=end_time - start_time,
+                    tool_calls=self.tool_log,
+                    token_usage={"input_tokens": 0, "output_tokens": 0},  # TODO: track tokens
+                    timestamp=datetime.now(),
+                    metadata={
+                        "framework": "google_adk_multiagent",
+                        "agent_count": 4,
+                        "agents": ["research", "product", "analysis", "coordinator"],
+                        "customer_id": customer_id
+                    }
+                )
