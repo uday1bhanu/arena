@@ -9,3 +9,4 @@ temp/
 .DS_STORE
 arena/frameworks/__pycache__/*
 arena/__pycache__/*
+paper/*
